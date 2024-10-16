@@ -1,0 +1,466 @@
+---
+title: |
+    | Stats 295
+    | Final Project
+author: |
+    | David Mwakima 
+    | Student ID: 11083916
+date: |
+    | 12/05/2022
+classoption:
+        - twocolumn
+output: 
+   bookdown::pdf_document2:
+    extra_dependencies: [bbold, bbm, upgreek]
+    toc: false
+citation_package: "natbib"
+bibliography: "My_bib.bib"
+biblio-style: "apalike"
+link-citations: true
+urlcolor: blue
+linkcolor: blue
+fig_caption: yes
+---
+
+```{r "Setting global chunk options", echo=FALSE}
+rm(list = ls())
+knitr::opts_chunk$set(echo = FALSE, 
+                      message = FALSE, 
+                      warning = FALSE, 
+                      fig.align = "center", 
+                      out.extra = "")
+```
+
+
+```{r "Loading the packages", include=FALSE}
+library("MASS")
+library("maps")
+library("fields")
+library("sf")
+library("akima")
+library("spBayes")
+library("RColorBrewer")
+library("classInt")
+library("gstat")
+library("sp")
+library("tidyverse")
+library("tidyr")
+library("ggplot2")
+library("geoR")
+library("kableExtra")
+library("nlme")
+library("lme4")
+library("CARBayes")
+library("maptools")
+library("spatstat")
+library("SpatialEpi")
+library("spatialreg")
+library("spdep")
+library("foreign")
+library("splancs")
+```
+
+
+# Background
+
+A typical approach to modeling a point-referenced spatial process $Y(\textbf{s})$ for $\textbf{s} \in \mathcal{D} \subset \mathbb{R}^2$ is using a Bayesian hierarchical model consisting of:
+
+\begin{itemize}
+\item \textbf{Data Model}
+
+\[
+Y(s_{i}) \, | \, \tilde{\beta}, \eta', \uptau^{2}, \tilde{\theta} \,\, \stackrel{ind}{\sim} N(\mu(s_{i}), \uptau^{2}\textbf{I}_{n})
+\]
+
+for $i = 1, 2, \dots, n$. Here $\mu(s_{i}) = \textbf{X}(s_{i})\tilde{\beta} + \eta'(s_{i})$ models the mean structure of $Y(\textbf{s})$. $\textbf{X}(s_{i})$ is an $n \times p$ design matrix with covariates at the observation locations and $\tilde{\beta}$ is a $p \times 1$ vector of regression coefficients.
+
+\item \textbf{Spatial Process Model}
+
+\[
+\eta'(s_{i}) | \tilde{\theta} \,\, \sim N(\textbf{0}, \Sigma(\tilde{\theta}))
+\]
+
+The $\eta'(s_{i})$ are spatial random effects, interpreted as capturing the effect of unmeasured or unobserved covariates with spatial correlation. The spatial process model is a mean-zero Gaussian process with an $n \times n$ covariance matrix $\Sigma(\tilde{\theta})$ induced by a stationary and isotropic covariance function $C(s, s'; \tilde{\theta})$ that depends on a set of parameters $\tilde{\theta}$.
+
+\item \textbf{Parameter Model}
+
+This consists of a prior distribution for $\tilde{\beta}$, a prior distribution for each of the components of the vector of parameters $\tilde{\theta}$ and a prior distribution for $\uptau^{2}$.
+
+\end{itemize}
+
+With this hierarchical model, inference proceeds using Markov chain Monte Carlo (MCMC) methods by sampling from the posterior distribution, which is proportional to the joint distribution of the product of these models. Computationally, the product of the data model and the spatial process model is a mixture of two Gaussian distributions. Specifically, this product requires one to compute the inverse of the square root of the determinant of $\Sigma(\tilde{\theta})$ and the inverse of $\Sigma(\tilde{\theta})$. But because there is spatial correlation in the $\eta'(\textbf{s})$ process, the matrix $\Sigma(\tilde{\theta})$ is not necessarily diagonal. This means that computing both the inverse and the determinant can be both computationally expensive and time intensive, especially for large matrices. This is the issue of dimensionality or the "big $n$" problem that forms the background of my paper.^[See [@Higdon2002], [@Johannesson2004], [@Banerjee2008], [@Cressie2008], [@Katzfuss2017] and [@Guan2018] for further background] It is not just a problem for Bayesian hierarchical modeling; the same problem needs to be faced in Frequentist statistics since the likelihood also involves computing both the determinant and the inverse of the covariance matrix $\Sigma(\tilde{\theta}) + \uptau^{2}\textbf{I}_{n}$.
+
+Although several proposals have been offered in the literature (See [@Higdon2002], [@Johannesson2004] and [@Guan2018] for an overview) to address this problem; in this paper, I will be interested specifically in \textit{predictive process models} due to [@Banerjee2008]. With these models, the "big $n$" problem is addressed by projecting the higher dimensional $\eta'(\textbf{s})$ process onto a much lower dimensional process $\tilde{\eta}'(\textbf{s})$ at a specified set of locations ("knots"). The basic idea is to predict (in the sense of "kriging") what the spatial process is at these knots based on the original process and then use this lower dimensional predictive process for parameter estimation and inference about the original process. Since the knots can be set to have dimensions orders of magnitude smaller than the number of dimensions of the parent process $\eta'(\textbf{s})$, the computational task can be simplified significantly. 
+
+
+However, one problem with this approach is the following. The predictive process $\tilde{\eta}'(\textbf{s})$ is a conditional expectation, given a realization of $\eta'(\textbf{s})$ at the knots. But the mean is always smoother than the original process. So, by using knots on coarser-grained regions we lose information on what happens on smaller distances in the original process. This is a problem if in the original process the correlation, in fact, decays faster on much smaller/finer distances. Consequently, one might worry that we are not \emph{truly} capturing the spatial correlation of the random effects $\eta'(s_{i})$. 
+
+In this paper, I investigate whether this is a genuine problem for this approach. One might think that this problem depends on how we set up the knots. So my question is: does the estimation of the covariance function parameters $\tilde{\theta}$ using the predictive process model depend on how the knot locations are chosen or specified? 
+
+# Simulations
+
+To address this question, I simulated some data on 900 locations on $\mathcal{D} = [0, 10] \times [0, 10] \subset \mathbb{R}^2$ regular grid with known values of $\tilde{\theta}$. 
+
+\begin{itemize}
+\item \textbf{Data Model}
+\[
+Y(s_{i}) \, | \, \tilde{\beta}, \eta', \uptau^{2}, \tilde{\theta} \,\, \stackrel{ind}{\sim} N(\mu(s_{i}), \uptau^{2}\textbf{I}_{n})
+\]
+
+for $i = 1, 2, \dots, 900$. Here $\mu(s_{i}) = 4.5 + 3.8X_{1}(s_{i}) + 8X_{2}(s_{i}) + \eta'(s_{i})$ models the mean structure of $Y(\textbf{s})$.
+
+\item \textbf{Spatial Process Model}
+\[
+\eta'(s_{i}) | \tilde{\theta} \,\, \sim N(\textbf{0}, \Sigma(\tilde{\theta}))
+\]
+
+Here $\Sigma(\tilde{\theta})$ is induced by a stationary and isotropic exponential covariance function $C(s, s'; \tilde{\theta})$ that depends on a set of parameters $\tilde{\theta} = (\sigma^{2} = 3, \phi = 2, \tau^{2} = 1)$.
+
+\end{itemize}
+
+```{r "Defining the grid", cache=TRUE, include=FALSE}
+x.grid <- seq(0, 10, length=30)
+y.grid <- seq(0, 10, length=30)
+n.grid <- length(x.grid)
+coord.pts <- matrix(0, nrow = n.grid*n.grid,
+                    ncol = 2)
+coord.pts[,1] <- rep(x.grid, each=n.grid)
+coord.pts[,2] <- rep(y.grid, n.grid)
+locations <- plot(coord.pts[,1], coord.pts[,2], 
+     xlab="X", ylab="Y",
+     main="Locations where the spatial process \n is simulated at",
+     type="p",
+     pch=21,
+     col="gray")
+```
+
+
+```{r "Distance Matrix"}
+N <- dim(coord.pts)[1]
+dist.mat <- rdist(coord.pts)
+```
+
+
+```{r "defining the variance-covariance matrices", include=FALSE}
+exp.cov <- function(sigma2, phi, tau2, dist.pts){
+  cov.value <- tau2 + (sigma2*(exp(-(dist.pts/phi))))
+  return(cov.value)
+}
+
+Sigma.exp <- matrix(0, N, N)
+sigma2.exp <- 3
+phi.exp <- 2
+tau2.exp <- 1
+
+for (i in 1:N){
+  for (j in 1:N){
+    Sigma.exp[i, j] <- exp.cov(sigma2.exp, phi.exp, tau2.exp, dist.mat[i, j])
+  }
+}
+```
+
+```{r "simulating the processes"}
+set.seed(183123)
+
+## design matrix
+X <- matrix(0, nrow=N, ncol=2)
+for (i in 1:N){
+  for (j in 1:2){
+    X[i, j] <- runif(1, 0, 1)
+  }
+}
+
+## mu(s)
+mu <- rep(0, N)
+for (i in 1:N){
+  mu[i] <- 4.5 + 3.8*X[i, 1] + 8*X[i, 2]
+}
+
+## simulation 2 of Gaussian process (exponential covariance)
+field.exp <- mvrnorm(1, mu, Sigma.exp)
+
+image.plot(x.grid,
+           y.grid,
+           matrix(field.exp, n.grid, n.grid),
+           col=terrain.colors(100),
+           xlab="X",
+           ylab="Y",
+           main="Simulated Spatial Process with \n Exponential Covariance Function")
+```
+
+I then fit a Bayesian hierarchical model to estimate the parameters using the `spLM` function with three different knot settings to investigate whether the estimates of $\tilde{\theta}$ depends on the knot settings. These are the knot settings:
+
+\begin{itemize}
+\item A regular grid which is a $6 \times 6$ partition of the original grid, i.e., 36 knots.
+\item A regular grid which is a $12 \times 12$ partition of the original grid, i.e., 144 knots.
+\item Randomly selected 324 locations in $\mathcal{D}$, i.e, 324 knots.
+\end{itemize} 
+Here is the hierarchical model specification of the parameter model:
+\begin{itemize}
+\item \textbf{Parameter Model}
+\[
+\begin{aligned}
+\beta_{j} &\propto 1 \,\, \text{for}\,\,j = 0, 1, \dots, 3 \\
+\sigma^{2} &\sim \text{InvGamma}(shape = 1, scale = 2) \\
+\uptau^{2} &\sim \text{InvGamma}(shape = 2, scale = 0.5) \\
+\phi &\sim \text{Unif}(0.15, 3)
+\end{aligned}
+\]
+\end{itemize}
+
+Here is my justification for these priors on the parameters. I specify an inverse gamma prior for $\sigma^{2}$ with shape parameter = 2 and scale parameter = 1. This achieves infinite variance. For the range, I used a uniform distribution such that the maximum distance between villages is contained in it. Since the maximum distance among points in my simulated dataset is approximately 14.14214, I will specify a uniform prior distribution for $\phi$ such that the effective range can range between 1 and 20. Given that the spBayes package parametrizes the exponential function as $\frac{1}{\phi}$, this means that when the effective range is 1, $\phi = 3/1 = 3$ and when the effective range is 20, $\phi = 3/20 = 0.15$. 
+
+## Knot setting 1
+
+Here I used a regular grid with 36 knots over $\mathcal{D}$ and ran the MCMC for 30000 iterations with a burn-in of 12000. The run-time was 3.75 minutes. See the traceplots below in Figure \@ref(fig:fig1) and Figure \@ref(fig:fig2).
+
+```{r "setting1", include=FALSE, cache=TRUE}
+set.seed(21233)
+y <- field.exp
+X_1 <- X[,1]
+X_2 <- X[,2]
+n <- dim(X)[1]
+
+beta.starting <- rep(0, 2)
+sigma2.starting <- 0.2
+phi.starting <- 0.4
+tau2.starting <- 0.16
+
+setting1.fit <- spLM(y ~ X_1 + X_2,
+                         coords = coord.pts,
+                         knots = c(6, 6, 0.1),
+                         starting=list("beta"= beta.starting,
+                                       "phi"= phi.starting,
+                                       "sigma.sq"= sigma2.starting,
+                                       "tau.sq"=tau2.starting),
+                         tuning=list("phi"= 0.006,
+                                     "sigma.sq"= 0.0035,
+                                     "tau.sq"= 0.001),
+                        priors=list("beta.Flat",
+                                    "phi.Unif"= c(0.15, 3),
+                                    "sigma.sq.IG"=c(2, 1),
+                                    "tau.sq.IG"=c(2, 0.5)),
+                        cov.model="exponential",
+                        n.samples=30000,
+                        verbose=TRUE, n.report = 5000)
+```
+
+```{r "fig1", fig.cap="Trace Plots of Mean Model Parameters Setting 1",cache=TRUE}
+n.samples <- 30000
+burn.in <- 0.4*n.samples
+setting1fit.other.params <- spRecover(setting1.fit,
+                                          start=burn.in,
+                                          verbose = FALSE)
+par(mai=rep(0.25, 4), mfrow = c(2, 2))
+plot(setting1fit.other.params$p.beta.recover.samples[, 1:3])
+```
+
+```{r "fig2", fig.cap="Trace Plots of the Covariance Parameters Setting 1"}
+par(mai=rep(0.25, 4), mfrow = c(2, 2))
+plot(setting1.fit$p.theta.samples)
+```
+
+With 36 knots, I obtained median estimates for $\tilde{\beta}$ of 4.7, 3.76 and 8.0, which are very close to the true values $\tilde{\beta} = (4.5,\, 3.8,\, 8)$ (See Table \@ref(tab:tab1)). The covariance function parameters estimates, however, are not as good (See Table \@ref(tab:tab2)). $\sigma^{2}$, whose median estimate is 3.47, is the only parameter whose estimate is close to the true value of 3. The median estimate of $\tau^{2}$ is 0.254, which is quite far from the true value of 1. Similarly, the median estimate for $\frac{1}{\phi}$ is 0.253. This implies a median estimate for $\phi$ of $1/0.253 = 3.95$, which is very far from the true value of 2.
+
+```{r "tab1"}
+beta_coeff.q <- round(apply(setting1fit.other.params$p.beta.recover.samples,
+                          2, quantile,c(0.025, 0.5, 0.975)), 3)
+beta_coeff.mean <- round(apply(setting1fit.other.params$p.beta.recover.samples,2,mean),3)
+beta_coeff <- rbind(beta_coeff.mean, beta_coeff.q)
+colnames(beta_coeff) <-c("Intercept", "X_1",
+                         "X_2")
+rownames(beta_coeff) <-c("Mean", "2.5%", "Median", "97.5%")
+beta_coeff %>%
+  kable(format = "latex",
+        align = "c",
+        digits = 4,
+        caption = "Bayesian Estimates of Mean Model Parameters Under Knot Setting 1",
+        booktabs = TRUE) %>%
+  kable_styling(latex_options = c("striped", "scale_down"))
+```
+
+```{r "tab2"}
+theta.q <- round(apply(setting1fit.other.params$p.theta.samples,
+                          2, quantile,c(0.025, 0.5, 0.975)), 3)
+theta.mean <- round(apply(setting1fit.other.params$p.theta.samples, 2, mean),3)
+theta.estimates <- rbind(theta.mean, theta.q)
+rownames(theta.estimates) <-c("Mean", "2.5%", "Median", "97.5%")
+theta.estimates %>%
+  kable(format = "latex",
+        align = "c",
+        digits = 4,
+        caption = "Bayesian Estimates of Covariance Function Parameters Under Knot Setting 1",
+        booktabs = TRUE) %>%
+  kable_styling(latex_options = c("striped", "scale_down"))
+```
+
+## Knot Setting 2
+
+Here I used a regular grid with 144 knots over $\mathcal{D}$ and ran the MCMC for 30000 iterations with a burn-in of 12000 and total run time of 38.5 minutes. See the traceplots below (Figure \@ref(fig:fig3) and Figure \@ref(fig:fig4)).
+
+```{r "setting2", include=FALSE, cache=TRUE }
+set.seed(212)
+setting2.fit <- spLM(y ~ X_1 + X_2,
+                         coords = coord.pts,
+                         knots = c(12, 12, 0.1),
+                         starting=list("beta"= beta.starting,
+                                       "phi"= phi.starting,
+                                       "sigma.sq"= sigma2.starting,
+                                       "tau.sq"=tau2.starting),
+                         tuning=list("phi"= 0.006,
+                                     "sigma.sq"= 0.0035,
+                                     "tau.sq"= 0.001),
+                        priors=list("beta.Flat",
+                                    "phi.Unif"= c(0.15, 3),
+                                    "sigma.sq.IG"=c(2, 1),
+                                    "tau.sq.IG"=c(2, 0.5)),
+                        cov.model="exponential",
+                        n.samples=30000,
+                        verbose=TRUE, n.report = 5000)
+```
+
+```{r "fig3", fig.cap="Trace Plots of Mean Model Parameters Setting 2",cache=TRUE}
+n.samples <- 30000
+burn.in <- 0.4*n.samples
+setting2fit.other.params <- spRecover(setting2.fit,
+                                          start=burn.in,
+                                          verbose = FALSE)
+par(mai=rep(0.25, 4), mfrow = c(2, 2))
+plot(setting2fit.other.params$p.beta.recover.samples[, 1:3])
+```
+
+```{r "fig4", fig.cap="Trace Plots of the Covariance Parameters Setting 2"}
+par(mai=rep(0.25, 4), mfrow = c(2, 2))
+plot(setting2.fit$p.theta.samples)
+```
+
+With 144 knots, I obtained median estimates for $\tilde{\beta}$ of 5.0, 3.71 and 8.0, which are still quite close to the true values $\tilde{\beta} = (4.5,\, 3.8,\, 8)$ (See Table \@ref(tab:tab3)). Although the estimates of the covariance function parameters here are better than those obtained with 36 knots; they are still not that good (See Table \@ref(tab:tab4)). The median estimate for $\sigma^{2}$ is 3.1, which is better than that obtained from 36 knots and very close to the true value of 3. The median estimate of $\tau^{2}$ is 0.077, which is still quite far from the true value of 1. Similarly, the median estimate for $\frac{1}{\phi}$ of 0.353 implies a median estimate for $\phi$ of $1/0.353 = 2.83$, which is somewhat far from the true value of 2; albeit a better estimate than the estimate with 36 knots.
+
+```{r "tab3"}
+beta_coeff.q.2 <- round(apply(setting2fit.other.params$p.beta.recover.samples,
+                          2, quantile,c(0.025, 0.5, 0.975)), 3)
+beta_coeff.mean.2 <- round(apply(setting2fit.other.params$p.beta.recover.samples,2,mean),3)
+beta_coeff.2 <- rbind(beta_coeff.mean.2, beta_coeff.q.2)
+colnames(beta_coeff.2) <-c("Intercept", "X_1",
+                         "X_2")
+rownames(beta_coeff.2) <-c("Mean", "2.5%", "Median", "97.5%")
+beta_coeff.2 %>%
+  kable(format = "latex",
+        align = "c",
+        digits = 4,
+        caption = "Bayesian Estimates of Mean Model Parameters Under Knot Setting 2",
+        booktabs = TRUE) %>%
+  kable_styling(latex_options = c("striped", "scale_down"))
+```
+
+```{r "tab4"}
+theta.q.2 <- round(apply(setting2fit.other.params$p.theta.samples,
+                          2, quantile,c(0.025, 0.5, 0.975)), 3)
+theta.mean.2 <- round(apply(setting2fit.other.params$p.theta.samples, 2, mean),3)
+theta.estimates.2 <- rbind(theta.mean.2, theta.q.2)
+rownames(theta.estimates.2) <-c("Mean", "2.5%", "Median", "97.5%")
+theta.estimates.2 %>%
+  kable(format = "latex",
+        align = "c",
+        digits = 4,
+        caption = "Bayesian Estimates of Covariance Function Parameters Under Knot Setting 2",
+        booktabs = TRUE) %>%
+  kable_styling(latex_options = c("striped", "scale_down"))
+```
+
+## Knot Setting 3
+
+For this knot setting I randomly picked 324 locations in $\mathcal{D}$ and ran the MCMC for 30000 iterations with a burn-in of 12000. The goal here was not just to see whether more knots improved the quality of the estimates (which is what we would expect ([@Banerjee2008])), but whether the arrangement of the knots matters (regular grid vs. irregular (chosen at random)). The run-time for this setting was 4.69 hours. See the traceplots below (Figure \@ref(fig:fig5) and Figure \@ref(fig:fig6)).
+
+```{r "324 knots", include=FALSE, cache=TRUE }
+knots.x.grid <- runif(18, 0, 10)
+knots.y.grid <- runif(18, 0, 10)
+knots.n.grid <- length(knots.x.grid)
+knots.pts <- matrix(0, nrow = knots.n.grid*knots.n.grid,
+                    ncol = 2)
+knots.pts[,1] <- rep(knots.x.grid, each=knots.n.grid)
+knots.pts[,2] <- rep(knots.y.grid, knots.n.grid)
+```
+
+
+```{r "setting3", include=FALSE, cache=TRUE }
+set.seed(1223)
+setting3.fit <- spLM(y ~ X_1 + X_2,
+                         coords = coord.pts,
+                         knots = knots.pts,
+                         starting=list("beta"= beta.starting,
+                                       "phi"= phi.starting,
+                                       "sigma.sq"= sigma2.starting,
+                                       "tau.sq"= tau2.starting),
+                         tuning=list("phi"= 0.006,
+                                     "sigma.sq"= 0.0035,
+                                     "tau.sq"= 0.001),
+                        priors=list("beta.Flat",
+                                    "phi.Unif"= c(0.15, 3),
+                                    "sigma.sq.IG"=c(2, 1),
+                                    "tau.sq.IG"=c(2, 0.5)),
+                        cov.model="exponential",
+                        n.samples=30000,
+                        verbose=TRUE, n.report = 5000)
+```
+
+```{r "fig5", fig.cap="Trace Plots of Mean Model Parameters Setting 3",cache=TRUE}
+n.samples <- 30000
+burn.in <- 0.4*n.samples
+setting3.fit.other.params <- spRecover(setting3.fit,
+                                          start=burn.in,
+                                          verbose = FALSE)
+par(mai=rep(0.25, 4), mfrow = c(2, 2))
+plot(setting3.fit.other.params$p.beta.recover.samples[, 1:3])
+```
+
+```{r "fig6", fig.cap="Trace Plots of the Covariance Parameters Setting 3"}
+par(mai=rep(0.25, 4), mfrow = c(2, 2))
+plot(setting3.fit$p.theta.samples)
+```
+
+
+With 324 randomly chosen knots, I obtained median estimates for $\tilde{\beta}$ of 5.6, 3.73 and 8.0; which, apart from the estimate for $\beta_{0}$, are still close to the true values $\tilde{\beta} = (4.5,\, 3.8,\, 8)$ (See Table \@ref(tab:tab5)). It is surprising that even with more knots, the estimates of the covariance function parameters here are worse than those obtained with 36 knots and 144 knots (See Table \@ref(tab:tab6)). $\sigma^{2}$, whose median estimate is 3.596, is further from the true value of 3 on this knot setting than on the other previous two settings. The median estimate of $\tau^{2}$, 0.132, is still quite far from the true value of 1. Similarly, the median estimate for $\frac{1}{\phi}$, 0.279, which implies a median estimate for $\phi$ of $1/0.279 = 3.58$; is very far from the true value of 2.
+
+
+```{r "tab5"}
+beta_coeff.q.3 <- round(apply(setting3.fit.other.params$p.beta.recover.samples,
+                          2, quantile,c(0.025, 0.5, 0.975)), 3)
+beta_coeff.mean.3 <- round(apply(setting3.fit.other.params$p.beta.recover.samples,2,mean),3)
+beta_coeff.3 <- rbind(beta_coeff.mean.3, beta_coeff.q.3)
+colnames(beta_coeff.3) <-c("Intercept", "X_1",
+                         "X_2")
+rownames(beta_coeff.3) <-c("Mean", "2.5%", "Median", "97.5%")
+beta_coeff.3 %>%
+  kable(format = "latex",
+        align = "c",
+        digits = 4,
+        caption = "Bayesian Estimates of Mean Model Parameters Under Knot Setting 3",
+        booktabs = TRUE) %>%
+  kable_styling(latex_options = c("striped", "scale_down"))
+```
+
+```{r "tab6"}
+theta.q.3 <- round(apply(setting3.fit.other.params$p.theta.samples,
+                          2, quantile,c(0.025, 0.5, 0.975)), 3)
+theta.mean.3 <- round(apply(setting3.fit.other.params$p.theta.samples, 2, mean),3)
+theta.estimates.3 <- rbind(theta.mean.3, theta.q.3)
+rownames(theta.estimates.3) <-c("Mean", "2.5%", "Median", "97.5%")
+theta.estimates.3 %>%
+  kable(format = "latex",
+        align = "c",
+        digits = 4,
+        caption = "Bayesian Estimates of Covariance Function Parameters Under Knot Setting 3",
+        booktabs = TRUE) %>%
+  kable_styling(latex_options = c("striped", "scale_down"))
+```
+
+# Discussion
+
+Although, predictive process models provide very good estimates for the mean model parameters $\tilde{\beta}$ on all knot settings I have investigated; I have found that the estimates of some of the covariance function parameters, viz. $\phi$ and $\tau^{2}$, are far from their true values. This is what we would expect given that the projected predictive process model for $Y(\textbf{s})$ is coarser than the parent process. There was little improvement in my estimates even after I increased the number of knots. What was even more surprising is that an irregular grid of 324 knots (randomly selected) led to worse parameter estimates than regular grids with 36 knots and 144 knots respectively. The reason this is surprising is that [@Banerjee2008], page 13 suggest that "estimation is more sensitive to the number of knots than to the underlying design." My work here suggests that a regular grid with fewer knots does better than an irregular grid with more knots!
+
+One limitation of my study is that I am comparing apples and oranges. That is, in order to raise this surprising challenge to [@Banerjee2008]'s suggestion, I need to compare: (1) an irregular grid with fewer knots to an irregular grid with more knots; or (2) a regular grid to an irregular grid where both have same number of knots but more knots than other regular grids. Future work can be directed towards making these comparisons.
+
+
+# References
+
